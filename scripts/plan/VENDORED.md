@@ -31,6 +31,14 @@ rebuilds it from the checkpoint's own saved `config.yaml` — that config alread
 `conf/experiment/dinov3.yaml`), so the register-aware encode path flows in through the
 checkpoint, not through a runtime overlay.
 
+**Licence.** These files are MIT-licensed by their upstream authors and keep that licence here;
+this repository's own `LICENSE` does not cover them. The text is at
+`licenses/stable-worldmodel-LICENSE.txt`, copied verbatim. Note the revision gap: the tag vendored
+below ships **no** `LICENSE` file — upstream added one later, in `ecc74e3` (2026-08-18, "Add MIT
+License to the project"), which is where the copied text comes from. At the vendored tag the MIT
+grant is declared in `pyproject.toml` (`license="MIT"`, plus the OSI MIT classifier) rather than as
+a licence file.
+
 - **Source:** `galilai-group/stable-worldmodel`
 - **Tag:** `0.1.1` (matches the `stable-worldmodel==0.1.1` pin in `uv.lock`)
 - **Commit:** `15a5538d492ae524c64cb18cc56a2d70611e877e`

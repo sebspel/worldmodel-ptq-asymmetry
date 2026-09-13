@@ -13,7 +13,8 @@ Both are exported PyTorch → ONNX → TensorRT and evaluated closed-loop agains
 **`entropy`**. Every speed number is reported with the success rate measured on the same solves.
 
 Training, the Push-T environment, the CEM solver and the evaluation loop come from
-`stable-worldmodel` and are used as they are. The code in this repository starts at a trained
+`stable-worldmodel` and are used as they are; their entrypoints are vendored here, so both
+trainings reproduce from scratch. The code written in this repository starts at a trained
 checkpoint: export, calibration, quantisation, benchmarking and the statistical analysis.
 
 ## Repository map
@@ -24,7 +25,7 @@ checkpoint: export, calibration, quantisation, benchmarking and the statistical 
 | `docs/architecture.md` | Non-obvious design rationale — silent-failure traps, platform quirks, library deviations |
 | `docs/platform_api.md` | The `stable-worldmodel` API as read from the pinned installed source |
 | `src/` | The owned code: adapter, export, calibration, engine runtime, shims, benchmark, statistics, report |
-| `scripts/` | Vendored platform entrypoints (`train/`, `plan/`), byte-unmodified apart from importing the encode-path override |
+| `scripts/` | Vendored platform entrypoints (`train/`, `plan/`) — provenance and the recorded divergences in each one's `VENDORED.md` |
 | `conf/experiment/` | Hydra overlays layered on the vendored configs |
 | `tests/` | The owned code's contract tests (CPU-only; the GPU legs are exercised on the pod) |
 | `reports/figs/` | The one committed display figure, re-copied from a render and never hand-edited |
@@ -52,7 +53,118 @@ dataset. A later bare `uv sync` prunes the out-of-lock installs; re-run `setup.s
 
 ## Reproducing the study
 
-The whole sequence, as one orchestrated run:
+Two stages, run in order. The first is the platform's own training entrypoints and produces the
+checkpoints; the second is this repository's code.
+
+| Stage | Runs on | Produces |
+| --- | --- | --- |
+| 1. Training | L40S (LeWM) / H200 SXM (DINOv3-WM) | The two checkpoints, under `$STABLEWM_HOME/checkpoints/` |
+| 2. Optimisation pipeline | L40S, then anywhere | The engines, the recorded samples, and the reported artifacts |
+
+### 1. Training the two world models
+
+Both trainings are the platform's own entrypoints, vendored under `scripts/train/` — the source
+tag, the commit, and the deliberate divergences from it are recorded in `scripts/train/VENDORED.md`.
+Each track is set up by a Hydra overlay in `conf/experiment/`; the only code this repository
+contributes to a training run is the one encode-path override (`src/dino_patch.py`), which the
+DINOv3-WM overlay reaches through `model._target_`.
+
+```bash
+uv run python -m scripts.train.lewm --config-dir conf +experiment=lewm
+```
+
+```bash
+uv run python -m scripts.train.prejepa --config-dir conf +experiment=dinov3
+```
+
+`--config-dir conf` puts this repository's overlays on Hydra's search path; `+experiment=` selects
+one. Invoke them as `python -m scripts.…` and never by file path: importing the `scripts` package
+is what reads `.env`, and the vendored entrypoints never import `src`. Without that hook the
+platform falls back to its `~/.stable_worldmodel` default — on the pod, the ephemeral container
+filesystem where a multi-hour run's checkpoints are lost on restart — and `WandbLogger` stalls on an
+interactive login prompt.
+
+| | LeWM | DINOv3-WM |
+| --- | --- | --- |
+| Entrypoint | `scripts/train/lewm.py` | `scripts/train/prejepa.py` |
+| Vendored base config | `scripts/train/config/lewm.yaml` | `scripts/train/config/prejepa.yaml` |
+| Overlay | `conf/experiment/lewm.yaml` | `conf/experiment/dinov3.yaml` |
+| Encoder | scratch ViT-Tiny, co-trained under SIGReg | DINOv3 ViT-S/16 (`dinov3_small`), frozen |
+| What trains | the whole model — encoder, predictor, action encoder, projectors | the predictor and the proprio/action embedders; the backbone alone is frozen |
+| Encoder latent | one CLS token, `(B, 192)` | the full patch grid, `(B, 196, 384)` |
+| Predictor input width | 192 — the action enters as a separate conditioning argument, not concatenated | 404 per patch = 384 visual + 10 proprio + 10 action, the extras tiled onto every patch |
+| Epochs / batch size | 10 / 128 | 10 / 128 |
+| Training GPU | L40S | H200 SXM |
+| Checkpoints written | `checkpoints/lewm/weights_epoch_{1..10}.pt` | `checkpoints/dino/weights_epoch_{5,10}.pt` |
+
+Training is **epoch-capped, not wall-clock-capped** (`SPEC.md` §Execution Rules). Batch size is held
+equal across the tracks; training *hardware* is not, and neither carries into inference — the engine
+is built and benchmarked on the same L40S from the checkpoint weights alone.
+
+Checkpoints land under `$STABLEWM_HOME/checkpoints/<output_model_name>/`: one `weights_epoch_N.pt`
+per save, plus the `config.json` the model is later rebuilt from. Both entrypoints save on an
+interval — every epoch for LeWM, every fifth for DINOv3-WM — so the directory holds several `.pt`
+files and `load_pretrained` cannot resolve a bare folder. That is why the eval overlays name the
+file (`policy: lewm/weights_epoch_10.pt`). Both entrypoints also hand `spt.Manager` a resume path —
+`$STABLEWM_HOME/checkpoints/<subdir>/<output_model_name>_weights.ckpt`, where `subdir` is the Hydra
+job id for LeWM and unset for DINOv3-WM — so if that file exists a re-run **resumes** from it
+instead of training from scratch.
+
+**The DINOv3-WM track is three config deltas on the platform's DINO-WM (`prejepa`) training**, and
+nothing else — same predictor, same loss, same framework:
+
+1. `backbone.name` / `backbone.type` → `dinov3_small`. There is no `backbone=` config *group*, so
+   `backbone=dinov3` would select nothing; both keys are set directly.
+2. `patch_size` 14 → 16. DINOv3 is a /16 model, and this key also drives the config-derived
+   `num_patches = (224 // 16)² = 196`. Left at the DINOv2 default of 14 it yields 256 — silently
+   wrong, not an error.
+3. `model._target_` → `src.dino_patch.DINOv3PreJEPA`, the register-aware encode override that drops
+   CLS **and** the four register tokens so the grid is the true 196 patches rather than 200. It is
+   baked into the saved `config.json` at train time, which is how it reaches eval and export too.
+
+The overlay also pins the run: `dataset_name` to the `pusht_expert_train.lance` that `setup.sh`
+fetches (the vendored default names a *video* dataset that is never downloaded), the batch size up
+from the vendored 32 to 128 for parity with LeWM, `trainer.precision` to `bf16-mixed`,
+`output_model_name` to `dino`, and `num_workers` down to 6 — under DDP each rank spawns its own
+worker set and each worker fans out OpenBLAS threads, so the vendored 16 exhausts the pod's thread
+cap and surfaces as a spurious `KeyboardInterrupt` during worker spawn rather than as an
+out-of-resources error. The LeWM overlay is smaller: the paper's 10 epochs, where the vendored
+config defaults to 100, and batch size 128. Both enable W&B into the shared project, which the
+vendored `launcher/local.yaml` leaves off, so training, eval and benchmark runs land together.
+
+DINOv3's weights are gated on Hugging Face — set `HF_TOKEN` before the first run or the download
+401s. The Push-T dataset itself is public.
+
+Before trusting a checkpoint, confirm both encode paths still produce the latents the rest of the
+study is sized for:
+
+```bash
+uv run python -m scripts.verify_encode
+```
+
+It builds the two real backbones and asserts LeWM's single-token latent and DINOv3-WM's 196-patch
+grid, differentially against the un-overridden 200-token path. An inactive override is silent
+everywhere else.
+
+What the epoch cap costs is measurable rather than assumed. The epoch-5 DINOv3-WM snapshot has its
+own overlay and its own `dino_ep5` track, evaluated under the identical pipeline — same dataset, CEM
+config, seeds and callback — without touching the headline `dino` artifacts: its engines live in
+`engines/dino_ep5/`, its SR rows key under `dino_ep5`, and it is deliberately absent from the
+two-track headline. It builds its own engines and depends on nothing else in the study, so it needs
+only the L40S and the epoch-5 checkpoint:
+
+```bash
+uv run python -m src.export model=dino_ep5 precision=fp32
+```
+
+```bash
+uv run python -m src.sr_eval --config-dir conf +experiment=eval_dino_ep5 precision=fp32
+```
+
+### 2. The optimisation pipeline
+
+Training is not part of `src.pipeline` — nothing in it runs through an engine. Everything from the
+trained checkpoint onward is one orchestrated run:
 
 ```bash
 uv run python -m src.pipeline
@@ -126,4 +238,6 @@ synthetic fixtures. The engine legs are exercised on the pod through the diagnos
 
 ## Licence
 
-MIT — see `LICENSE`.
+MIT — see `LICENSE`. That covers the code written here; the vendored platform files under
+`scripts/` remain under their own upstream MIT licence, reproduced in `licenses/` and pointed to
+from each directory's `VENDORED.md`.
