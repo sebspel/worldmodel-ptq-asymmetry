@@ -206,6 +206,27 @@ command — your shell expands `$STABLEWM_HOME` before Python reads `.env`, so i
 uv run python -m src.report from=/mnt/archive/2026-08-07
 ```
 
+### 3. Encoder-embedding capture
+
+Runs only the encoder engines of one track over three fixed frame sets and saves every engine's
+embeddings: `dataset` (10,000 frames strided over the episodes the calibration set never touched),
+`eval_init` and `eval_goal` (the 50 eval episodes' initial and goal frames). Needs the built encoder
+engines; run it once per track:
+
+```bash
+uv run python -m src.embeddings track=lewm
+```
+
+```bash
+uv run python -m src.embeddings track=dino
+```
+
+Add `sets=eval_init,eval_goal` to capture a subset. Output lands under
+`$STABLEWM_HOME/reports/embeddings/`: `frames.<set>.json` (the frame list, written once and checked on
+every later run) and `<track>/<set>/encoder.<precision>[.<method>].npy` (float32, row `i` = frame
+`i`) with a sidecar `.json` recording which tokens were saved and which the engine cannot provide.
+A re-run fills only the missing engines.
+
 ## Artifacts
 
 Everything durable lives under `$STABLEWM_HOME/reports/phase5/`, never in git. The **canonical**

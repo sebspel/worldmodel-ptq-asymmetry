@@ -544,6 +544,17 @@ What the finished project must satisfy; `README.md` carries the ordered run comm
   the tables where SR and the p50 appear, as the method-unscoped **`latency_means_table.txt`**, and
   as error bars on the speed-vs-SR figure. `results.*.json`, `sr.json` and the component-latency
   artefact are **read-only** to this analysis and stay byte-unchanged. (`docs/architecture.md`.)
+- **Encoder-embedding capture.** Every encoder engine of both tracks (FP32, FP16, and INT8/FP8 at
+  both calibration methods) is run — encoder only, no predictor or planner — over three fixed frame
+  sets, and its embeddings are persisted for off-pod analysis: **10,000 frames evenly strided over
+  `pusht_expert_train.lance`, drawn only from episodes that contribute no calibration clip**, and the
+  **50 eval episodes' initial and goal frames**, as the vendored eval selects and feeds them. Each set's
+  frame list is written once and every later run must reproduce it exactly (a mismatch fails loudly),
+  so row `i` of every embedding file is the same frame across engines and tracks. **What is saved is
+  exactly the engine's output — nothing is reconstructed:** the DINOv3 patch grid `(196, 384)` and the
+  LeWM `projector(CLS)` latent `(192,)`. The DINOv3 CLS and the LeWM patch tokens are not engine
+  outputs and are recorded as skipped. Embeddings are stored at the engine's native float32, as
+  durable artifacts on the persistent volume, and are never overwritten (CLAUDE §8).
 - **GPU telemetry.** Because clocks cannot be locked and no thermal steady state is established
   (§Execution Environment), the per-run clock and thermal state is recorded: a passive
   `nvidia-smi dmon` observer logs alongside every timed run, and the logs are reduced to per-run
