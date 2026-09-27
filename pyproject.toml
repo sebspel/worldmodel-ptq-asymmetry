@@ -40,6 +40,9 @@ dependencies = [
     # from an uncommitted `.env` at the repo root rather than typed into a shell, so a pod
     # session and an off-pod render resolve the same paths and secrets.
     "python-dotenv",
+    # Embedding isotropy (`src/isotropy.py`): the per-engine PCA. Already present transitively;
+    # declared for the same reason as scipy above.
+    "scikit-learn",
 ]
 
 [dependency-groups]

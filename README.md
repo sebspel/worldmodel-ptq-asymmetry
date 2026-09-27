@@ -227,6 +227,25 @@ every later run) and `<track>/<set>/encoder.<precision>[.<method>].npy` (float32
 `i`) with a sidecar `.json` recording which tokens were saved and which the engine cannot provide.
 A re-run fills only the missing engines.
 
+### 4. Embedding isotropy
+
+Off-pod, over the captured `dataset` embeddings: a float64 PCA per encoder engine, plotted as the
+normalised eigenvalue spectrum `λ_k / mean(λ)` and as each non-FP32 engine's `λ_k / λ_k(FP32)`. Run
+it once per track:
+
+```bash
+uv run python -m src.isotropy track=lewm
+```
+
+```bash
+uv run python -m src.isotropy track=dino
+```
+
+The figures land in `$STABLEWM_HOME/reports/phase5/isotropy/` as `<name>.png` and
+`<name>.fp32_ratio.png`. LeWM has one `<name>`, `lewm.dataset`. DINO has two: `dino.dataset.mean_pool`
+(the patch mean) and `dino.dataset.random_patch` (one seeded random patch per frame, centred by its
+position's mean); the seed and drawn positions are kept in `dino.dataset.random_patch.json`.
+
 ## Artifacts
 
 Everything durable lives under `$STABLEWM_HOME/reports/phase5/`, never in git. The **canonical**
